@@ -1,88 +1,74 @@
-import { Injectable } from '@nestjs/common';
-import { spawn } from 'child_process';
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { execSync, spawn } from 'child_process';
 import { Response } from 'express';
+import sanitize from 'sanitize-filename';
 
 @Injectable()
 export class DownloadService {
-  async getAvailableFormats(url: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const process = spawn('yt-dlp', ['-j', url]); // Get full JSON info
+  async downloadMedia(url: string, type: 'video' | 'audio', res: Response) {
+    try {
+      const result = execSync(`yt-dlp -j "${url}"`, { encoding: 'utf-8' });
+      const data = JSON.parse(result);
 
-      let output = '';
-      let error = '';
+      const title = sanitize(data.title || 'media');
+      let formatId: string;
+      let ext: string;
+      let contentType: string;
 
-      process.stdout.on('data', (data) => {
-        output += data.toString();
-      });
+      if (type === 'audio') {
+        // Find best audio-only format
+        const bestAudio = data.formats
+          .filter((f) => f.vcodec === 'none')
+          .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
 
-      process.stderr.on('data', (data) => {
-        error += data.toString();
-      });
-
-      process.on('close', (code) => {
-        if (code !== 0) {
-          return reject(new Error(error || 'yt-dlp failed'));
+        if (!bestAudio) {
+          throw new BadRequestException('No audio format found');
         }
 
-        try {
-          const json = JSON.parse(output);
+        formatId = bestAudio.format_id;
+        ext = bestAudio.ext || 'm4a';
+        contentType = bestAudio.ext === 'webm' ? 'audio/webm' : 'audio/mp4';
+      } else {
+        // Find best MP4 format with video and audio
+        const bestVideo = data.formats
+          .filter((f) => f.ext === 'mp4' && f.vcodec !== 'none' && f.acodec !== 'none')
+          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
 
-          const formats = json.formats.map((f) => ({
-            format_id: f.format_id,
-            extension: f.ext,
-            resolution: f.resolution || `${f.width || '?'}x${f.height || '?'}`,
-            fps: f.fps || null,
-            audio_only: !f.vcodec || f.vcodec === 'none',
-            video_only: !f.acodec || f.acodec === 'none',
-            filesize_mb: f.filesize
-              ? (f.filesize / (1024 * 1024)).toFixed(2)
-              : null,
-            note: f.format_note || f.format,
-          }));
-
-          resolve({
-            title: json.title,
-            duration_seconds: json.duration,
-            duration_hms: this.secondsToHMS(json.duration),
-            thumbnail: json.thumbnail,
-            uploader: json.uploader,
-            formats,
-          });
-        } catch (err) {
-          reject(new Error('Failed to parse yt-dlp JSON output'));
+        if (!bestVideo) {
+          throw new BadRequestException('No MP4 video format found');
         }
-      });
-    });
-  }
 
-  downloadVideo(url: string, format: string, res: Response): void {
-    const args = ['-f', format, '-o', '-', url];
-    const process = spawn('yt-dlp', args);
-
-    res.set({
-      'Content-Disposition': `attachment; filename="video-${format}.mp4"`,
-      'Content-Type': 'video/mp4',
-    });
-
-    process.stdout.pipe(res);
-
-    process.stderr.on('data', (data) => {
-      console.error(`yt-dlp error: ${data}`);
-    });
-
-    process.on('close', (code) => {
-      if (code !== 0) {
-        res.status(500).send('Failed to download video.');
+        formatId = bestVideo.format_id;
+        ext = bestVideo.ext || 'mp4';
+        contentType = 'video/mp4';
       }
-    });
-  }
 
-  private secondsToHMS(seconds: number): string {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s
-      .toString()
-      .padStart(2, '0')}`;
+      const filename = `${title}.${ext}`;
+      const encodedFilename = encodeURIComponent(filename);
+
+      // Set proper headers
+      res.setHeader('Content-Type', contentType);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"; filename*=UTF-8''${encodedFilename}`,
+      );
+
+      const yt = spawn('yt-dlp', ['-f', formatId, '-o', '-', url]);
+
+      yt.stdout.pipe(res);
+
+      yt.stderr.on('data', (data) => {
+        console.error(`yt-dlp error: ${data}`);
+      });
+
+      yt.on('close', (code) => {
+        if (code !== 0) {
+          console.error(`yt-dlp exited with code ${code}`);
+        }
+      });
+    } catch (error) {
+      console.error('Download failed:', error.message);
+      throw new BadRequestException('Failed to download media');
+    }
   }
 }

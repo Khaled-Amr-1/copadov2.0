@@ -12,30 +12,17 @@ import { Response } from 'express';
 export class DownloadController {
   constructor(private readonly downloadService: DownloadService) {}
 
-  @Get('formats')
-  async getFormats(@Query('url') url: string, @Res() res: Response) {
-    if (!url) throw new BadRequestException('Missing "url" query parameter');
-
-    try {
-      const result = await this.downloadService.getAvailableFormats(url);
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  }
-
   @Get()
-  download(
+  async download(
     @Query('url') url: string,
-    @Query('format') format: string,
+    @Query('type') type: string, // 'video' or 'audio'
     @Res() res: Response,
   ) {
-    if (!url || !format) {
-      throw new BadRequestException(
-        'Missing "url" or "format" query parameter',
-      );
+    if (!url) {
+      throw new BadRequestException('Missing "url" query parameter');
     }
 
-    this.downloadService.downloadVideo(url, format, res);
+    const downloadType = type === 'audio' ? 'audio' : 'video'; // default is video
+    await this.downloadService.downloadMedia(url, downloadType, res);
   }
 }
